@@ -54,6 +54,19 @@ const TURN_TYPE = {
   DEFEND: "defend"
 }
 
+// Function to broadcast available games to all clients
+function broadcastAvailableGames() {
+  const availableGames = Object.values(games)
+    .filter((game) => game.phase === "waiting" && game.players.length < 2)
+    .map((game) => ({
+      id: game.id,
+      host: game.players[0].name,
+      players: game.players.length,
+    }));
+
+  io.emit("available_games", { games: availableGames });
+}
+
 // Calculate effectiveness multiplier based on attack and defense types
 const getEffectivenessMultiplier = (attackType, defenseType) => {
   if (
@@ -109,6 +122,8 @@ io.on("connection", (socket) => {
     // Notify client that game was created
     socket.emit("game_joined", { gameId })
 
+    broadcastAvailableGames()
+
     console.log(`Game created: ${gameId} by player ${playerName} (${playerId})`)
   })
 
@@ -159,6 +174,8 @@ io.on("connection", (socket) => {
       gameId,
       gameState: game  // Send latest game state to newly joined client
     })
+
+    broadcastAvailableGames()
 
     console.log(`Player ${playerName} (${playerId}) joined game ${gameId}`)
   })
@@ -334,6 +351,8 @@ io.on("connection", (socket) => {
 
     // Leave the socket room
     socket.leave(gameId)
+
+    broadcastAvailableGames()
   })
 
   // Disconnect
