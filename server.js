@@ -17,6 +17,7 @@ const io = new Server(server, {
 // Types (for documentation, not used in JS)
 /**
  * @typedef {"rock" | "paper" | "scissors"} MoveType
+ * @typedef {"attack" | "defend"} TurnType
  *
  * @typedef {Object} Player
  * @property {string} id
@@ -27,12 +28,13 @@ const io = new Server(server, {
  * @property {number} defense
  * @property {MoveType|null} currentAttackType
  * @property {MoveType|null} currentDefenseType
- * @property {boolean} ready
  *
  * @typedef {Object} Game
  * @property {string} id
  * @property {Player[]} players
  * @property {string|null} currentTurn
+ * @property {TurnType} currentTurnType
+ * @property {Object|null} pendingAttack
  * @property {"waiting" | "selection" | "battle" | "game_over"} phase
  * @property {string|null} winner
  * @property {string[]} gameLog
@@ -45,6 +47,12 @@ const games = {}
 const SUPER_EFFECTIVE = 2.0
 const NORMAL_EFFECTIVE = 1.0
 const NOT_EFFECTIVE = 0.5
+
+// Turn types
+const TURN_TYPE = {
+  ATTACK: "attack",
+  DEFEND: "defend"
+}
 
 // Calculate effectiveness multiplier based on attack and defense types
 const getEffectivenessMultiplier = (attackType, defenseType) => {
@@ -66,116 +74,6 @@ const generateGameId = () => {
   return Math.random().toString(36).substring(2, 8).toUpperCase()
 }
 
-// Process battle between two players
-function processBattle(game, io) {
-  const player1 = game.players[0]
-  const player2 = game.players[1]
-
-  // Process player 1's attack against player 2's defense
-  const p1AttackType = player1.currentAttackType
-  const p2DefenseType = player2.currentDefenseType
-  const p1Effectiveness = getEffectivenessMultiplier(p1AttackType, p2DefenseType)
-  const p1Damage = Math.max(
-    5,
-    Math.floor(player1.attack * p1Effectiveness.multiplier - player2.defense + Math.floor(Math.random() * 5)),
-  )
-
-  // Process player 2's attack against player 1's defense
-  const p2AttackType = player2.currentAttackType
-  const p1DefenseType = player1.currentDefenseType
-  const p2Effectiveness = getEffectivenessMultiplier(p2AttackType, p1DefenseType)
-  const p2Damage = Math.max(
-    5,
-    Math.floor(player2.attack * p2Effectiveness.multiplier - player1.defense + Math.floor(Math.random() * 5)),
-  )
-
-  // Apply damage
-  player2.health = Math.max(0, player2.health - p1Damage)
-  player1.health = Math.max(0, player1.health - p2Damage)
-
-  // Update game log
-  let effectivenessText1 = ""
-  if (p1Effectiveness.type === "super") {
-    effectivenessText1 = "It's super effective!"
-  } else if (p1Effectiveness.type === "not") {
-    effectivenessText1 = "It's not very effective..."
-  }
-
-  let effectivenessText2 = ""
-  if (p2Effectiveness.type === "super") {
-    effectivenessText2 = "It's super effective!"
-  } else if (p2Effectiveness.type === "not") {
-    effectivenessText2 = "It's not very effective..."
-  }
-
-  game.gameLog = [
-    `${player1.name} attacks with ${p1AttackType} for ${p1Damage} damage! ${effectivenessText1}`,
-    `${player2.name} attacks with ${p2AttackType} for ${p2Damage} damage! ${effectivenessText2}`,
-    ...game.gameLog,
-  ]
-
-  // Send attack animations to clients
-  io.to(game.id).emit("attack_animation", {
-    attackerId: player1.id,
-    defenderId: player2.id,
-    attackType: p1AttackType,
-    defenseType: p2DefenseType,
-    effectiveness: p1Effectiveness.type,
-  })
-
-  // Delay second attack animation
-  setTimeout(() => {
-    io.to(game.id).emit("attack_animation", {
-      attackerId: player2.id,
-      defenderId: player1.id,
-      attackType: p2AttackType,
-      defenseType: p1DefenseType,
-      effectiveness: p2Effectiveness.type,
-    })
-  }, 2000)
-
-  // Check if game is over
-  if (player1.health <= 0 || player2.health <= 0) {
-    game.phase = "game_over"
-
-    if (player1.health <= 0 && player2.health <= 0) {
-      // Draw
-      game.winner = null
-      game.gameLog = ["The battle ended in a draw!", ...game.gameLog]
-    } else if (player1.health <= 0) {
-      // Player 2 wins
-      game.winner = player2.id
-      game.gameLog = [`${player2.name} wins the battle!`, ...game.gameLog]
-    } else {
-      // Player 1 wins
-      game.winner = player1.id
-      game.gameLog = [`${player1.name} wins the battle!`, ...game.gameLog]
-    }
-
-    // Notify clients about game over
-    io.to(game.id).emit("game_over", {
-      winnerId: game.winner,
-    })
-  } else {
-    // Reset for next round
-    player1.currentAttackType = null
-    player1.currentDefenseType = null
-    player1.ready = false
-
-    player2.currentAttackType = null
-    player2.currentDefenseType = null
-    player2.ready = false
-
-    game.phase = "selection"
-    game.currentTurn = player1.id // First player goes first again
-  }
-
-  // Update game state for all clients after a delay
-  setTimeout(() => {
-    io.to(game.id).emit("game_state_update", game)
-  }, 4000)
-}
-
 io.on("connection", (socket) => {
   console.log("Client connected:", socket.id)
 
@@ -194,11 +92,12 @@ io.on("connection", (socket) => {
           attack: 15,
           defense: 5,
           currentAttackType: null,
-          currentDefenseType: null,
-          ready: false,
+          currentDefenseType: null
         },
       ],
       currentTurn: null,
+      currentTurnType: TURN_TYPE.ATTACK, // Default to attack for the first turn
+      pendingAttack: null,
       phase: "waiting",
       winner: null,
       gameLog: ["Waiting for opponent to join..."],
@@ -236,23 +135,30 @@ io.on("connection", (socket) => {
       attack: 15,
       defense: 5,
       currentAttackType: null,
-      currentDefenseType: null,
-      ready: false,
+      currentDefenseType: null
     })
 
     // Join the socket to the game room
     socket.join(gameId)
 
     // Start the game
-    game.phase = "selection"
+    game.phase = "selection"  // Change game phase
     game.currentTurn = game.players[0].id // First player goes first
-    game.gameLog = [`${playerName} joined the game. ${game.players[0].name} goes first!`]
+    game.currentTurnType = TURN_TYPE.ATTACK // First player attacks
+    game.pendingAttack = null
+    game.gameLog = [`${playerName} joined the game. ${game.players[0].name} goes first with an attack!`]
 
-    // Notify all clients in the room about the game state
-    io.to(gameId).emit("game_state_update", game)
+    // Emit game state update to all clients BEFORE emitting game_joined
+    io.to(gameId).emit("game_state_update", {
+      ...game,
+      phase: "selection"  // Ensure game phase is sent correctly
+    })
 
     // Notify the joining client that they joined successfully
-    socket.emit("game_joined", { gameId })
+    socket.emit("game_joined", {
+      gameId,
+      gameState: game  // Send latest game state to newly joined client
+    })
 
     console.log(`Player ${playerName} (${playerId}) joined game ${gameId}`)
   })
@@ -270,8 +176,8 @@ io.on("connection", (socket) => {
     socket.emit("available_games", { games: availableGames })
   })
 
-  // Submit move
-  socket.on("submit_move", ({ gameId, playerId, attackType, defenseType }) => {
+  // Submit attack
+  socket.on("submit_attack", ({ gameId, playerId, attackType }) => {
     const game = games[gameId]
 
     if (!game) {
@@ -279,38 +185,122 @@ io.on("connection", (socket) => {
       return
     }
 
-    const player = game.players.find((p) => p.id === playerId)
+    const player = game.players.find(p => p.id === playerId)
 
     if (!player) {
       socket.emit("error", { message: "Player not found in game" })
       return
     }
 
-    if (game.currentTurn !== playerId) {
-      socket.emit("error", { message: "Not your turn" })
+    if (game.currentTurn !== playerId || game.currentTurnType !== TURN_TYPE.ATTACK) {
+      socket.emit("error", { message: "Not your turn to attack" })
       return
     }
 
-    // Update player's move
+    // Store the pending attack
     player.currentAttackType = attackType
-    player.currentDefenseType = defenseType
-    player.ready = true
+    game.pendingAttack = { playerId, attackType }
 
-    // Check if both players have submitted their moves
-    const allPlayersReady = game.players.every((p) => p.ready)
+    // Change turn to other player for defense
+    const defender = game.players.find(p => p.id !== playerId)
+    game.currentTurn = defender.id
+    game.currentTurnType = TURN_TYPE.DEFEND
 
-    if (allPlayersReady) {
-      // Process the battle
-      processBattle(game, io)
+    // Update game log
+    game.gameLog = [`${player.name} chose ${attackType} attack. ${defender.name} must choose a defense.`, ...game.gameLog]
+
+    // Update game state for all clients
+    io.to(gameId).emit("game_state_update", game)
+  })
+
+  // Submit defense
+  socket.on("submit_defense", ({ gameId, playerId, defenseType }) => {
+    const game = games[gameId]
+
+    if (!game) {
+      socket.emit("error", { message: "Game not found" })
+      return
+    }
+
+    const defender = game.players.find(p => p.id === playerId)
+
+    if (!defender) {
+      socket.emit("error", { message: "Player not found in game" })
+      return
+    }
+
+    if (game.currentTurn !== playerId || game.currentTurnType !== TURN_TYPE.DEFEND) {
+      socket.emit("error", { message: "Not your turn to defend" })
+      return
+    }
+
+    if (!game.pendingAttack) {
+      socket.emit("error", { message: "No pending attack to defend against" })
+      return
+    }
+
+    const attackerId = game.pendingAttack.playerId
+    const attackType = game.pendingAttack.attackType
+    const attacker = game.players.find(p => p.id === attackerId)
+
+    // Store defense type
+    defender.currentDefenseType = defenseType
+
+    // Calculate effectiveness and damage
+    const { multiplier, type } = getEffectivenessMultiplier(attackType, defenseType)
+    const damage = Math.max(5, Math.floor(attacker.attack * multiplier - defender.defense + Math.floor(Math.random() * 5)))
+
+    // Reduce defender's health
+    defender.health = Math.max(0, defender.health - damage)
+
+    // Update game log
+    let effectivenessText = ""
+    if (type === "super") {
+      effectivenessText = "It's super effective!"
+    } else if (type === "not") {
+      effectivenessText = "It's not very effective..."
+    }
+
+    game.gameLog = [
+      `${defender.name} defended with ${defenseType}.`,
+      `${attacker.name}'s ${attackType} attack dealt ${damage} damage! ${effectivenessText}`,
+      ...game.gameLog
+    ]
+
+    // Kirim animasi serangan
+    io.to(gameId).emit("attack_animation", {
+      attackerId: attacker.id,
+      defenderId: defender.id,
+      attackType,
+      defenseType,
+      effectiveness: type
+    })
+
+    // Check if game is over
+    if (defender.health <= 0) {
+      game.phase = "game_over"
+      game.winner = attacker.id
+      game.gameLog = [`${attacker.name} wins the battle!`, ...game.gameLog]
+
+      // Send game over notification
+      io.to(gameId).emit("game_over", {
+        winnerId: attacker.id
+      })
+
+      // Update game state for all clients after delay
+      setTimeout(() => {
+        io.to(gameId).emit("game_state_update", game)
+      }, 2000)
     } else {
-      // Switch turns
-      game.currentTurn = game.players.find((p) => p.id !== playerId)?.id || null
+      // Change turn - now defender becomes attacker
+      game.currentTurn = defender.id
+      game.currentTurnType = TURN_TYPE.ATTACK
+      game.pendingAttack = null
 
-      // Update game log
-      game.gameLog = [`${player.name} has chosen their move. Waiting for opponent...`, ...game.gameLog]
-
-      // Update game state for all clients
-      io.to(gameId).emit("game_state_update", game)
+      // Update game state for all clients after delay
+      setTimeout(() => {
+        io.to(gameId).emit("game_state_update", game)
+      }, 2000)
     }
   })
 
@@ -320,22 +310,27 @@ io.on("connection", (socket) => {
 
     if (!game) return
 
-    // Notify other player that this player left
-    const otherPlayer = game.players.find((p) => p.id !== playerId)
+    // Remove the player from the game's players array
+    game.players = game.players.filter(p => p.id !== playerId)
 
-    if (otherPlayer) {
+    // If there are still other players, notify them
+    if (game.players.length > 0) {
+      const otherPlayer = game.players[0]
       io.to(gameId).emit("game_state_update", {
         ...game,
         phase: "game_over",
         winner: otherPlayer.id,
         gameLog: [`${game.players.find((p) => p.id === playerId)?.name || "Opponent"} left the game.`, ...game.gameLog],
       })
-    }
 
-    // Remove the game after a delay
-    setTimeout(() => {
+      // Remove the game after a delay if there are other players
+      setTimeout(() => {
+        delete games[gameId]
+      }, 5000)
+    } else {
+      // If no players left, remove the game immediately
       delete games[gameId]
-    }, 5000)
+    }
 
     // Leave the socket room
     socket.leave(gameId)
@@ -357,4 +352,3 @@ const PORT = process.env.PORT || 3001
 server.listen(PORT, () => {
   console.log(`Socket.io server running on port ${PORT}`)
 })
-
