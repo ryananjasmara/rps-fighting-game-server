@@ -9,7 +9,7 @@ app.use(cors())
 const server = http.createServer(app)
 const io = new Server(server, {
   cors: {
-    origin: "*", // In production, restrict this to your frontend URL
+    origin: "https://v0-rps-fighting-game.vercel.app/", // In production, restrict this to your frontend URL
     methods: ["GET", "POST"],
   },
 })
