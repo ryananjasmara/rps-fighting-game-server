@@ -164,10 +164,12 @@ io.on("connection", (socket) => {
     game.gameLog = [`${playerName} joined the game. ${game.players[0].name} goes first with an attack!`]
 
     // Emit game state update to all clients BEFORE emitting game_joined
-    io.to(gameId).emit("game_state_update", {
-      ...game,
-      phase: "selection"  // Ensure game phase is sent correctly
-    })
+    setTimeout(() => {
+      io.to(gameId).emit("game_state_update", {
+        ...game,
+        phase: "selection"  // Ensure game phase is sent correctly
+      })
+    }, 500)
 
     // Notify the joining client that they joined successfully
     socket.emit("game_joined", {
@@ -243,16 +245,6 @@ io.on("connection", (socket) => {
 
     if (!defender) {
       socket.emit("error", { message: "Player not found in game" })
-      return
-    }
-
-    if (game.currentTurn !== playerId || game.currentTurnType !== TURN_TYPE.DEFEND) {
-      socket.emit("error", { message: "Not your turn to defend" })
-      return
-    }
-
-    if (!game.pendingAttack) {
-      socket.emit("error", { message: "No pending attack to defend against" })
       return
     }
 
