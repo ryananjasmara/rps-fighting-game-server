@@ -226,7 +226,7 @@ io.on("connection", (socket) => {
     game.currentTurnType = TURN_TYPE.DEFEND
 
     // Update game log
-    game.gameLog = [`${player.name} chose ${attackType} attack. ${defender.name} must choose a defense.`, ...game.gameLog]
+    game.gameLog = [`${player.name} has choose the attack type. ${defender.name} must choose a defense.`, ...game.gameLog]
 
     // Update game state for all clients
     io.to(gameId).emit("game_state_update", game)
